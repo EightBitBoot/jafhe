@@ -1,3 +1,4 @@
 
 # Exclude build files
-bin/*
+build/
+bin/
