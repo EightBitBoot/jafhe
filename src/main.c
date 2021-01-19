@@ -10,9 +10,15 @@ typedef uint8_t byte;
 
 struct _ProgramState {
     GtkWidget *window;
+
     GtkWidget *fileWidgetsBox;
+    GtkWidget *offsetBox;
+    GtkWidget *hexBox;
+    GtkWidget *asciiBox;
 
     PangoFontDescription *fontDesc;
+    uint fontWidth;
+    uint fontHeight;
 
     // TODO(Adin): Make this resizable for different line lengths later
     uint hexLineBufferLen;
@@ -55,7 +61,9 @@ void closeCurrentFile(bool titleUpdateNeeded) {
         updateTitle();
     }
 
-    gtk_widget_queue_draw(state.fileWidgetsBox);
+    if(state.fileWidgetsBox) {
+        gtk_widget_queue_draw(state.fileWidgetsBox);
+    }
 }
 
 void openFile(char *filename) {
@@ -74,7 +82,9 @@ void openFile(char *filename) {
     memset(state.fileBuffer, 0, state.fileLength + 1);
     fread(state.fileBuffer, 1, state.fileLength, state.file);
 
-    gtk_widget_queue_draw(state.fileWidgetsBox);
+    if(state.fileWidgetsBox) {
+        gtk_widget_queue_draw(state.fileWidgetsBox);
+    }
 }
 
 void openMenuAction(GtkMenuItem *menuItem) {
@@ -95,12 +105,49 @@ void openMenuAction(GtkMenuItem *menuItem) {
     gtk_widget_destroy(dialog);
 }
 
+uint getFontWidth(GtkWidget *widget, PangoFontDescription *fontDesc) {
+    PangoLayout *layout = gtk_widget_create_pango_layout(widget, "");
+    PangoRectangle rect = {0};
+
+    uint maxWidth = 0;
+    char str[2] = {0};
+
+    pango_layout_set_font_description(layout, fontDesc);
+
+    for(int i = 0x20; i <= 0x7E; i++) {
+        snprintf(str, 2, "%c", (char) i);
+        pango_layout_set_text(layout,  str, -1);
+        pango_layout_get_pixel_extents(layout, NULL, &rect);
+
+        maxWidth = MAX(rect.width, maxWidth);
+    }
+
+    g_object_unref(G_OBJECT(layout));
+
+    return maxWidth;
+}
+
 void updateFont(PangoFontDescription *newDesc) {
+    GtkWidget *temp = NULL;
+
+    PangoContext *hexPangoContext = NULL;
+    PangoFontMetrics *fontMetrics = NULL;
+
     pango_font_description_free(state.fontDesc);
     state.fontDesc = newDesc;
 
-    // TODO(Adin): Update font metrics (height, width)
-    printf("Selected Font Family: %s\n", pango_font_description_get_family(state.fontDesc));
+    // TODO(Adin): Update font metrics 
+    temp = gtk_text_view_new();
+
+    hexPangoContext = gtk_widget_get_pango_context(temp);
+    fontMetrics = pango_context_get_metrics(hexPangoContext, state.fontDesc, NULL);
+
+    state.fontHeight = PANGO_PIXELS(pango_font_metrics_get_ascent(fontMetrics)) + PANGO_PIXELS(pango_font_metrics_get_descent(fontMetrics)) + 2;
+    state.fontWidth = getFontWidth(temp, state.fontDesc);
+
+    gtk_widget_destroy(temp);
+    
+    printf("Selected Font Family: %s, Width: %u, Height: %u\n", pango_font_description_get_family(state.fontDesc), state.fontWidth, state.fontHeight);
 
     if(state.fileWidgetsBox) {
         gtk_widget_queue_draw(state.fileWidgetsBox);
@@ -165,29 +212,28 @@ void fillHexBuffer(ulong offset) {
 } 
 
 gboolean renderHexBox(GtkWidget *widget, cairo_t *cr) {
+    if(!state.file) {
+        // If there isn't an open file don't render the box
+        return FALSE;
+    }
+
     GtkStyleContext *styleContext = gtk_widget_get_style_context(widget);
     GtkStateFlags widgetState = gtk_style_context_get_state(styleContext);
 
     PangoContext *pangoContext = gtk_widget_get_pango_context(widget);
-    PangoFontMetrics *fontMetrics = pango_context_get_metrics(pangoContext, state.fontDesc, NULL);    
     PangoLayout *pangoLayout = pango_layout_new(pangoContext); 
 
     GdkRGBA fgColor = {0};
-    GdkRGBA pink    = {0};
     
     gtk_style_context_get_color(styleContext, widgetState, &fgColor);
-    gdk_rgba_parse(&pink, "#FF24FE");
 
     uint width = gtk_widget_get_allocated_width(widget);
     uint height = gtk_widget_get_allocated_height(widget);
 
-    uint fontHeight = PANGO_PIXELS(pango_font_metrics_get_ascent(fontMetrics)) + PANGO_PIXELS(pango_font_metrics_get_descent(fontMetrics)) + 2;
-    uint numLines = height / fontHeight;
-    if(height % fontHeight) {
+    uint numLines = height / state.fontHeight;
+    if(height % state.fontHeight) {
         numLines++;
     }
-
-    char *hexStr = "0B AA FA AF 76 67 69 DB DD BB AF 76 73 00 80 90";
 
     gtk_render_background(styleContext, cr, 0, 0, width, height);
 
@@ -195,21 +241,58 @@ gboolean renderHexBox(GtkWidget *widget, cairo_t *cr) {
     // gdk_cairo_set_source_rgba(cr, &fgColor);
     // cairo_fill(cr);
 
-    cairo_set_line_width(cr, 1);
     gdk_cairo_set_source_rgba(cr, &fgColor);
-
     pango_layout_set_font_description(pangoLayout, state.fontDesc);
-    pango_layout_set_text(pangoLayout, hexStr, strlen(hexStr));
 
     for(int i = 0; i < numLines; i++) {
-        if(state.file) {
-            fillHexBuffer(i * 0x10);
-            pango_layout_set_text(pangoLayout, state.hexLineBuffer, -1);
-        }
-        else {
-            pango_layout_set_text(pangoLayout, "", -1);
-        }
-        cairo_move_to(cr, 0, i * fontHeight);
+        fillHexBuffer(i * 0x10);
+        pango_layout_set_text(pangoLayout, state.hexLineBuffer, -1);
+
+        cairo_move_to(cr, 2, i * state.fontHeight);
+        pango_cairo_show_layout(cr, pangoLayout);
+    }
+
+    g_object_unref(G_OBJECT(pangoLayout));
+
+    return FALSE;
+}
+
+gboolean renderOffsetBox(GtkWidget *widget, cairo_t *cr) {
+    if(!state.file) {
+        // If there isn't an open file don't render the box
+        return FALSE;
+    }
+
+    GtkStyleContext *styleContext = gtk_widget_get_style_context(widget);
+    GtkStateFlags widgetState = gtk_style_context_get_state(styleContext);
+
+    PangoContext *pangoContext = gtk_widget_get_pango_context(widget);
+    PangoLayout *pangoLayout = pango_layout_new(pangoContext);
+
+    GdkRGBA fgColor = {0};
+
+    char buffer[9] = {0}; // 2 bytes "0x" + 8 bytes of hex + null terminator
+
+    gtk_style_context_get_color(styleContext, widgetState, &fgColor);
+    
+    uint width = gtk_widget_get_allocated_width(widget);
+    uint height = gtk_widget_get_allocated_height(widget);
+
+    uint numLines = height / state.fontHeight;
+    if(height % state.fontHeight) {
+        numLines++;
+    }
+
+    gtk_render_background(styleContext, cr, 0, 0, width, height);
+    
+    gdk_cairo_set_source_rgba(cr, &fgColor);
+    pango_layout_set_font_description(pangoLayout, state.fontDesc);
+
+    for(int i = 0; i < numLines; i++) {
+        snprintf(buffer, 9, "%08X", i * 0x10);
+        pango_layout_set_text(pangoLayout, buffer, 10);
+
+        cairo_move_to(cr, 2, i * state.fontHeight);
         pango_cairo_show_layout(cr, pangoLayout);
     }
 
@@ -259,8 +342,9 @@ int main(int argc, char **argv) {
 
     GtkWidget *vbox = NULL;
 
-    GtkWidget *drawingArea = NULL;
-    GtkStyleContext *areaStyleContext = NULL;
+    GtkStyleContext *hexStyleContext = NULL;
+    GtkStyleContext *asciiStyleContext = NULL; // TODO(Adin): For later
+    (void) asciiStyleContext;
 
     PangoFontDescription *defaultFontDesc = NULL;
 
@@ -281,13 +365,20 @@ int main(int argc, char **argv) {
     menubar = buildMenu();
 
     state.fileWidgetsBox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+    gtk_box_set_spacing(GTK_BOX(state.fileWidgetsBox), 6);
 
-    drawingArea = gtk_drawing_area_new();
-    areaStyleContext = gtk_widget_get_style_context(drawingArea);
-    gtk_style_context_add_class(areaStyleContext, GTK_STYLE_CLASS_VIEW);
-    g_signal_connect(drawingArea, "draw", G_CALLBACK(renderHexBox), NULL);
+    state.offsetBox = gtk_drawing_area_new();
+    gtk_widget_set_size_request(state.offsetBox, 8 * state.fontWidth + 4, -1);
+    g_signal_connect(state.offsetBox, "draw", G_CALLBACK(renderOffsetBox), NULL);
 
-    gtk_box_pack_start(GTK_BOX(state.fileWidgetsBox), drawingArea, TRUE, TRUE, 0);
+    state.hexBox = gtk_drawing_area_new();
+    gtk_widget_set_size_request(state.hexBox, (HEX_BUFFER_LENGTH - 1) * state.fontWidth + 4, -1);
+    hexStyleContext = gtk_widget_get_style_context(state.hexBox);
+    gtk_style_context_add_class(hexStyleContext, GTK_STYLE_CLASS_VIEW);
+    g_signal_connect(state.hexBox, "draw", G_CALLBACK(renderHexBox), NULL);
+
+    gtk_box_pack_start(GTK_BOX(state.fileWidgetsBox), state.offsetBox, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(state.fileWidgetsBox), state.hexBox, FALSE, FALSE, 0);
 
     gtk_box_pack_start(GTK_BOX(vbox), menubar, FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(vbox), state.fileWidgetsBox, TRUE, TRUE, 0);
