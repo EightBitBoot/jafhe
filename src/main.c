@@ -1,10 +1,19 @@
 #include <stdio.h>
 #include <stdbool.h>
 #include <string.h>
+#include <math.h>
 
 #include <gtk/gtk.h>
 
-#define REG_LINE_LEN 63
+#define IN_RANGE(x, min, max) ((x >= min) && (x <= max))
+
+#define HEX_BUFFER_LENGTH 48
+#define HEX_BUFFER_OFFSET(x) (x * 2 + (x - 1))
+
+#define ASCII_BUFFER_LENGTH 17
+
+#define BOX_SPACING_PX 6
+#define TEXT_MARGIN_PX 2
 
 typedef uint8_t byte;
 
@@ -20,13 +29,18 @@ struct _ProgramState {
     uint fontWidth;
     uint fontHeight;
 
+    uint widgetHeight;
+    uint numLines;
+
     // TODO(Adin): Make this resizable for different line lengths later
-    uint hexLineBufferLen;
-    char hexLineBuffer[48];
+    char hexLineBuffer[HEX_BUFFER_LENGTH];
+
+    char asciiLineBuffer[ASCII_BUFFER_LENGTH];
 
     FILE *file;
     char *fileFullName;
     ulong fileLength;
+    uint  fileNumLines;
     byte *fileBuffer;
 };
 typedef struct _ProgramState ProgramState;
@@ -60,6 +74,9 @@ void closeCurrentFile(bool titleUpdateNeeded) {
     if(titleUpdateNeeded) {
         updateTitle();
     }
+
+    state.fileLength = 0;
+    state.fileNumLines = 0;
 
     if(state.fileWidgetsBox) {
         gtk_widget_queue_draw(state.fileWidgetsBox);
@@ -127,6 +144,21 @@ uint getFontWidth(GtkWidget *widget, PangoFontDescription *fontDesc) {
     return maxWidth;
 }
 
+void updateSizeRequests() {
+    if(state.offsetBox) {
+        gtk_widget_set_size_request(state.offsetBox, 8 * state.fontWidth + 2 * TEXT_MARGIN_PX, -1);
+        // printf("OffsetBox: %d\n", state.offsetBox, 8 * state.fontWidth + 2 * TEXT_MARGIN_PX);
+    }
+    if(state.hexBox) {
+        gtk_widget_set_size_request(state.hexBox, (HEX_BUFFER_LENGTH - 1) * state.fontWidth + 2 * TEXT_MARGIN_PX, -1);
+        // printf("HexBox: %d\n", state.offsetBox, (HEX_BUFFER_LENGTH - 1) * state.fontWidth + 2 * TEXT_MARGIN_PX);
+    }
+    if(state.asciiBox) {
+        gtk_widget_set_size_request(state.asciiBox, (ASCII_BUFFER_LENGTH - 1) * state.fontWidth + 2 * TEXT_MARGIN_PX, -1);
+        // printf("AsciiBox: %d\n", (ASCII_BUFFER_LENGTH - 1) * state.fontWidth + 2 * TEXT_MARGIN_PX);
+    }
+}
+
 void updateFont(PangoFontDescription *newDesc) {
     GtkWidget *temp = NULL;
 
@@ -149,9 +181,12 @@ void updateFont(PangoFontDescription *newDesc) {
     
     printf("Selected Font Family: %s, Width: %u, Height: %u\n", pango_font_description_get_family(state.fontDesc), state.fontWidth, state.fontHeight);
 
+    updateSizeRequests();
+
     if(state.fileWidgetsBox) {
         gtk_widget_queue_draw(state.fileWidgetsBox);
     }
+
 }
 
 void fontMenuAction(GtkMenuItem *menuItem) {
@@ -194,14 +229,24 @@ void updateTitle() {
     }
 }
 
-#define HEX_BUFFER_LENGTH 48
-#define HEX_BUFFER_OFFSET(x) (x * 2 + (x - 1))
+void updateSize(GtkWidget *widget, GdkRectangle *newRectangle) {
+    if(newRectangle) {
+        state.widgetHeight = newRectangle->height; 
+    }
+
+    if(state.fontHeight != 0) {
+        state.numLines = state.widgetHeight / state.fontHeight;
+        if(state.widgetHeight % state.fontHeight) {
+            state.numLines++;
+        }
+    }
+}
 
 void fillHexBuffer(ulong offset) {
     // TODO(Adin): Update for when ending lines in a file are less than a full line
     // TODO(Adin): Update when lines are resizable
 
-    for(int i = 0; i < 16; i++) {
+    for(long i = 0; i < 16; i++) {
         if(i == 0) {
             snprintf(state.hexLineBuffer, HEX_BUFFER_LENGTH, "%02X", state.fileBuffer[offset + i]);
         }
@@ -211,50 +256,21 @@ void fillHexBuffer(ulong offset) {
     }
 } 
 
-gboolean renderHexBox(GtkWidget *widget, cairo_t *cr) {
-    if(!state.file) {
-        // If there isn't an open file don't render the box
-        return FALSE;
+void fillAsciiBuffer(ulong offset) {
+    // TODO(Adin): Update for when ending lines in a file are less than a full line
+    // TODO(Adin): Update when lines are resizable
+    char current = 0;
+
+    for(long i = 0; i < 16; i++) {
+        if(IN_RANGE(state.fileBuffer[offset + i], 0x20, 0x7E)) {
+            current = state.fileBuffer[offset + i];
+        }
+        else {
+            current = '.';
+        }
+
+        snprintf(state.asciiLineBuffer + i, ASCII_BUFFER_LENGTH - i, "%c", current);
     }
-
-    GtkStyleContext *styleContext = gtk_widget_get_style_context(widget);
-    GtkStateFlags widgetState = gtk_style_context_get_state(styleContext);
-
-    PangoContext *pangoContext = gtk_widget_get_pango_context(widget);
-    PangoLayout *pangoLayout = pango_layout_new(pangoContext); 
-
-    GdkRGBA fgColor = {0};
-    
-    gtk_style_context_get_color(styleContext, widgetState, &fgColor);
-
-    uint width = gtk_widget_get_allocated_width(widget);
-    uint height = gtk_widget_get_allocated_height(widget);
-
-    uint numLines = height / state.fontHeight;
-    if(height % state.fontHeight) {
-        numLines++;
-    }
-
-    gtk_render_background(styleContext, cr, 0, 0, width, height);
-
-    // cairo_arc(cr, width / 2.0, height / 2.0, MIN(width, height) / 2.0, 0, 2 * G_PI);
-    // gdk_cairo_set_source_rgba(cr, &fgColor);
-    // cairo_fill(cr);
-
-    gdk_cairo_set_source_rgba(cr, &fgColor);
-    pango_layout_set_font_description(pangoLayout, state.fontDesc);
-
-    for(int i = 0; i < numLines; i++) {
-        fillHexBuffer(i * 0x10);
-        pango_layout_set_text(pangoLayout, state.hexLineBuffer, -1);
-
-        cairo_move_to(cr, 2, i * state.fontHeight);
-        pango_cairo_show_layout(cr, pangoLayout);
-    }
-
-    g_object_unref(G_OBJECT(pangoLayout));
-
-    return FALSE;
 }
 
 gboolean renderOffsetBox(GtkWidget *widget, cairo_t *cr) {
@@ -278,21 +294,94 @@ gboolean renderOffsetBox(GtkWidget *widget, cairo_t *cr) {
     uint width = gtk_widget_get_allocated_width(widget);
     uint height = gtk_widget_get_allocated_height(widget);
 
-    uint numLines = height / state.fontHeight;
-    if(height % state.fontHeight) {
-        numLines++;
-    }
-
     gtk_render_background(styleContext, cr, 0, 0, width, height);
     
     gdk_cairo_set_source_rgba(cr, &fgColor);
     pango_layout_set_font_description(pangoLayout, state.fontDesc);
 
-    for(int i = 0; i < numLines; i++) {
+    for(int i = 0; i < state.numLines; i++) {
         snprintf(buffer, 9, "%08X", i * 0x10);
         pango_layout_set_text(pangoLayout, buffer, 10);
 
-        cairo_move_to(cr, 2, i * state.fontHeight);
+        cairo_move_to(cr, TEXT_MARGIN_PX, i * state.fontHeight);
+        pango_cairo_show_layout(cr, pangoLayout);
+    }
+
+    g_object_unref(G_OBJECT(pangoLayout));
+
+    return FALSE;
+}
+
+gboolean renderHexBox(GtkWidget *widget, cairo_t *cr) {
+    if(!state.file) {
+        // If there isn't an open file don't render the box
+        return FALSE;
+    }
+
+    GtkStyleContext *styleContext = gtk_widget_get_style_context(widget);
+    GtkStateFlags widgetState = gtk_style_context_get_state(styleContext);
+
+    PangoContext *pangoContext = gtk_widget_get_pango_context(widget);
+    PangoLayout *pangoLayout = pango_layout_new(pangoContext); 
+
+    GdkRGBA fgColor = {0};
+    
+    gtk_style_context_get_color(styleContext, widgetState, &fgColor);
+
+    uint width = gtk_widget_get_allocated_width(widget);
+    uint height = gtk_widget_get_allocated_height(widget);
+
+    gtk_render_background(styleContext, cr, 0, 0, width, height);
+
+    // cairo_arc(cr, width / 2.0, height / 2.0, MIN(width, height) / 2.0, 0, 2 * G_PI);
+    // gdk_cairo_set_source_rgba(cr, &fgColor);
+    // cairo_fill(cr);
+
+    gdk_cairo_set_source_rgba(cr, &fgColor);
+    pango_layout_set_font_description(pangoLayout, state.fontDesc);
+
+    for(int i = 0; i < state.numLines; i++) {
+        fillHexBuffer(i * 0x10);
+        pango_layout_set_text(pangoLayout, state.hexLineBuffer, -1);
+
+        cairo_move_to(cr, TEXT_MARGIN_PX, i * state.fontHeight);
+        pango_cairo_show_layout(cr, pangoLayout);
+    }
+
+    g_object_unref(G_OBJECT(pangoLayout));
+
+    return FALSE;
+}
+
+gboolean renderAsciiBox(GtkWidget *widget, cairo_t *cr) {
+    if(!state.file) {
+        // If there isn't an open file don't render the box
+        return FALSE;
+    }
+
+    GtkStyleContext *styleContext = gtk_widget_get_style_context(widget);
+    GtkStateFlags widgetState = gtk_style_context_get_state(styleContext);
+
+    PangoContext *pangoContext = gtk_widget_get_pango_context(widget);
+    PangoLayout *pangoLayout = pango_layout_new(pangoContext); 
+
+    GdkRGBA fgColor = {0};
+    
+    gtk_style_context_get_color(styleContext, widgetState, &fgColor);
+
+    uint width = gtk_widget_get_allocated_width(widget);
+    uint height = gtk_widget_get_allocated_height(widget);
+
+    gtk_render_background(styleContext, cr, 0, 0, width, height);
+
+    gdk_cairo_set_source_rgba(cr, &fgColor);
+    pango_layout_set_font_description(pangoLayout, state.fontDesc);
+
+    for(int i = 0; i < state.numLines; i++) {
+        fillAsciiBuffer(i * 0x10);
+        pango_layout_set_text(pangoLayout, state.asciiLineBuffer, -1);
+
+        cairo_move_to(cr, TEXT_MARGIN_PX, i * state.fontHeight);
         pango_cairo_show_layout(cr, pangoLayout);
     }
 
@@ -343,8 +432,7 @@ int main(int argc, char **argv) {
     GtkWidget *vbox = NULL;
 
     GtkStyleContext *hexStyleContext = NULL;
-    GtkStyleContext *asciiStyleContext = NULL; // TODO(Adin): For later
-    (void) asciiStyleContext;
+    GtkStyleContext *asciiStyleContext = NULL;
 
     PangoFontDescription *defaultFontDesc = NULL;
 
@@ -365,20 +453,27 @@ int main(int argc, char **argv) {
     menubar = buildMenu();
 
     state.fileWidgetsBox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
-    gtk_box_set_spacing(GTK_BOX(state.fileWidgetsBox), 6);
+    gtk_box_set_spacing(GTK_BOX(state.fileWidgetsBox), BOX_SPACING_PX);
 
     state.offsetBox = gtk_drawing_area_new();
-    gtk_widget_set_size_request(state.offsetBox, 8 * state.fontWidth + 4, -1);
     g_signal_connect(state.offsetBox, "draw", G_CALLBACK(renderOffsetBox), NULL);
 
     state.hexBox = gtk_drawing_area_new();
-    gtk_widget_set_size_request(state.hexBox, (HEX_BUFFER_LENGTH - 1) * state.fontWidth + 4, -1);
     hexStyleContext = gtk_widget_get_style_context(state.hexBox);
     gtk_style_context_add_class(hexStyleContext, GTK_STYLE_CLASS_VIEW);
+    g_signal_connect(state.hexBox, "size-allocate", G_CALLBACK(updateSize), NULL);
     g_signal_connect(state.hexBox, "draw", G_CALLBACK(renderHexBox), NULL);
+
+    state.asciiBox = gtk_drawing_area_new();
+    asciiStyleContext = gtk_widget_get_style_context(state.asciiBox);
+    gtk_style_context_add_class(asciiStyleContext, GTK_STYLE_CLASS_VIEW);
+    g_signal_connect(state.asciiBox, "draw", G_CALLBACK(renderAsciiBox), NULL);
+
+    updateSizeRequests();
 
     gtk_box_pack_start(GTK_BOX(state.fileWidgetsBox), state.offsetBox, FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(state.fileWidgetsBox), state.hexBox, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(state.fileWidgetsBox), state.asciiBox, FALSE, FALSE, 0);
 
     gtk_box_pack_start(GTK_BOX(vbox), menubar, FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(vbox), state.fileWidgetsBox, TRUE, TRUE, 0);
