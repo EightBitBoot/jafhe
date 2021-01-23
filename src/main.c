@@ -11,7 +11,7 @@
 #define LINE_LENGTH 16
 #define DEFAULT_FONT "Monospace Normal 12"
 
-#define HEX_BUFFER_LENGTH 48
+#define HEX_BUFFER_LENGTH 48 // TODO(Adin): Update this later when lines are resizable
 #define HEX_BUFFER_OFFSET(x) (x * 2 + (x - 1))
 
 #define ASCII_BUFFER_LENGTH 17
@@ -24,7 +24,10 @@ typedef uint8_t byte;
 struct _ProgramState {
     GtkWidget *window;
 
-    GtkWidget *fileWidgetsBox;
+    GtkWidget *closeMenuI;
+    GtkWidget *gotoMenuI;
+
+    GtkWidget *viewWidgetsBox;
     GtkWidget *offsetBox;
     GtkWidget *hexBox;
     GtkWidget *asciiBox;
@@ -46,18 +49,48 @@ struct _ProgramState {
 
     FILE *file;
     char *fileFullName;
+    byte *fileBuffer;
     ulong fileLength;
     uint  fileNumLines;
-    byte *fileBuffer;
 };
 typedef struct _ProgramState ProgramState;
 
 static ProgramState state = {0};
 
-void closeCurrentFile(bool titleUpdateNeeded);
-void updateTitle();
-void updateSizeRequests();
+int jceil(double value);
+
+void shutdownAndCleanup();
+void closeCurrentFile(bool performUpdates);
+
+void openFile(char *filename);
+void openMenuAction(GtkMenuItem *menuItem);
+void gotoActivateCallback(GtkWidget *widget, gpointer data);
 void openGotoDialog();
+void gotoMenuAction(GtkWidget *widget);
+void fontMenuAction(GtkMenuItem *menuItem);
+
+bool onKeyPress(GtkWidget *widget, GdkEventKey *event);
+void onUpdateSize(GtkWidget *widget, GdkRectangle *newRectangle);
+void onAdjValueChanged(GtkAdjustment *adj);
+void onScrollEvent(GtkWidget *widget, GdkEvent *event);
+
+void updateTitle();
+uint getFontWidth(GtkWidget *widget, PangoFontDescription *fontDesc);
+void updateFont(PangoFontDescription *newDesc);
+void updateSizeRequests();
+void updateSizeRequests();
+
+void fillHexBuffer(ulong offset);
+void fillAsciiBuffer(ulong offset);
+gboolean renderOffsetBox(GtkWidget *widget, cairo_t *cr);
+gboolean renderHexBox(GtkWidget *widget, cairo_t *cr);
+gboolean renderAsciiBox(GtkWidget *widget, cairo_t *cr);
+
+void toggleMenuSensitivity();
+bool accelCallback(GtkAccelGroup *group, GObject *obj, guint keyval, GdkModifierType modifier, gpointer data);
+GtkWidget *buildMenu();
+
+int main(int argc, char **argv);
 
 int jceil(double value) {
     if(value > (int) value) {
@@ -74,31 +107,35 @@ void shutdownAndCleanup() {
     gtk_main_quit();
 }
 
-void closeCurrentFile(bool titleUpdateNeeded) {
-    if(state.fileBuffer != NULL) {
-        free(state.fileBuffer);
-        state.fileBuffer = NULL;
-    }
+void closeCurrentFile(bool performUpdates) {
     if(state.file != NULL) {
         fclose(state.file);
         state.file = NULL;
     }
+    
     if(state.fileFullName != NULL) {
         free(state.fileFullName);
         state.fileFullName = NULL;
     }
 
-    if(titleUpdateNeeded) {
-        updateTitle();
+    if(state.fileBuffer != NULL) {
+        free(state.fileBuffer);
+        state.fileBuffer = NULL;
     }
 
     state.fileLength = 0;
     state.fileNumLines = 0;
+    
+    if(performUpdates) {
+        updateTitle();
+        toggleMenuSensitivity();
+    }
+
 
     updateSizeRequests();
 
-    if(state.fileWidgetsBox) {
-        gtk_widget_queue_draw(state.fileWidgetsBox);
+    if(state.viewWidgetsBox) {
+        gtk_widget_queue_draw(state.viewWidgetsBox);
     }
 }
 
@@ -120,10 +157,11 @@ void openFile(char *filename) {
 
     state.fileNumLines = jceil((float) state.fileLength / (float) LINE_LENGTH);
 
+    toggleMenuSensitivity();
     updateSizeRequests();
 
-    if(state.fileWidgetsBox) {
-        gtk_widget_queue_draw(state.fileWidgetsBox);
+    if(state.viewWidgetsBox) {
+        gtk_widget_queue_draw(state.viewWidgetsBox);
     }
 }
 
@@ -143,28 +181,6 @@ void openMenuAction(GtkMenuItem *menuItem) {
     updateTitle();
 
     gtk_widget_destroy(dialog);
-}
-
-uint getFontWidth(GtkWidget *widget, PangoFontDescription *fontDesc) {
-    PangoLayout *layout = gtk_widget_create_pango_layout(widget, "");
-    PangoRectangle rect = {0};
-
-    uint maxWidth = 0;
-    char str[2] = {0};
-
-    pango_layout_set_font_description(layout, fontDesc);
-
-    for(int i = 0x20; i <= 0x7E; i++) {
-        snprintf(str, 2, "%c", (char) i);
-        pango_layout_set_text(layout,  str, -1);
-        pango_layout_get_pixel_extents(layout, NULL, &rect);
-
-        maxWidth = MAX(rect.width, maxWidth);
-    }
-
-    g_object_unref(G_OBJECT(layout));
-
-    return maxWidth;
 }
 
 void gotoActivateCallback(GtkWidget *widget, gpointer data) {
@@ -197,15 +213,13 @@ void openGotoDialog() {
             long offset = 0;
 
             offset = strtol(entryText, &rest, 16);
-            printf("Entry: %s\n", entryText);
-            printf("Offset: %ld\n", offset);
-            printf("Rest: %s\n", rest);
 
             if(strlen(rest) != 0) {
                 GtkWidget *invalidDialog = gtk_message_dialog_new(GTK_WINDOW(dialog), GTK_DIALOG_MODAL | GTK_DIALOG_DESTROY_WITH_PARENT, GTK_MESSAGE_ERROR, GTK_BUTTONS_CLOSE, "Invalid Offset: \"%s\"", entryText);
                 gtk_dialog_run(GTK_DIALOG(invalidDialog));
                 gtk_widget_destroy(invalidDialog);
                 gtk_entry_set_text(GTK_ENTRY(entry), "");
+                gtk_widget_grab_focus(GTK_WIDGET(entry));
             } 
             else {
                 // Success
@@ -233,65 +247,6 @@ void gotoMenuAction(GtkWidget *widget) {
     }
 }
 
-void updateSizeRequests() {
-    int height = -1;
-
-    if(state.file) {
-        height = MIN(10, state.fileNumLines) * state.fontHeight;
-    }
-
-    if(state.fileWidgetsBox) {
-        gtk_widget_set_size_request(state.fileWidgetsBox, -1, height);
-    }
-
-    if(state.offsetBox) {
-        gtk_widget_set_size_request(state.offsetBox, 8 * state.fontWidth + 2 * TEXT_MARGIN_PX, height);
-        // printf("OffsetBox: %d\n", state.offsetBox, 8 * state.fontWidth + 2 * TEXT_MARGIN_PX);
-    }
-
-    if(state.hexBox) {
-        gtk_widget_set_size_request(state.hexBox, (HEX_BUFFER_LENGTH - 1) * state.fontWidth + 2 * TEXT_MARGIN_PX, height);
-        // printf("HexBox: %d\n", state.offsetBox, (HEX_BUFFER_LENGTH - 1) * state.fontWidth + 2 * TEXT_MARGIN_PX);
-    }
-
-    if(state.asciiBox) {
-        gtk_widget_set_size_request(state.asciiBox, (ASCII_BUFFER_LENGTH - 1) * state.fontWidth + 2 * TEXT_MARGIN_PX, height);
-        // printf("AsciiBox: %d\n", (ASCII_BUFFER_LENGTH - 1) * state.fontWidth + 2 * TEXT_MARGIN_PX);
-    }
-}
-
-void updateFont(PangoFontDescription *newDesc) {
-    GtkWidget *temp = NULL;
-
-    PangoContext *hexPangoContext = NULL;
-    PangoFontMetrics *fontMetrics = NULL;
-
-    pango_font_description_free(state.fontDesc);
-    state.fontDesc = newDesc;
-
-    temp = gtk_text_view_new();
-
-    hexPangoContext = gtk_widget_get_pango_context(temp);
-    fontMetrics = pango_context_get_metrics(hexPangoContext, state.fontDesc, NULL);
-
-    state.fontHeight = PANGO_PIXELS(pango_font_metrics_get_ascent(fontMetrics)) + PANGO_PIXELS(pango_font_metrics_get_descent(fontMetrics)) + 2;
-    state.fontWidth = getFontWidth(temp, state.fontDesc);
-
-    gtk_widget_destroy(temp);
-    
-    printf("Selected Font Family: %s, Width: %u, Height: %u\n", pango_font_description_get_family(state.fontDesc), state.fontWidth, state.fontHeight);
-
-    updateSizeRequests();
-
-    if(state.fileWidgetsBox) {
-        gtk_widget_queue_draw(state.fileWidgetsBox);
-    }
-}
-
-void onScrollEvent(GtkWidget *widget, GdkEvent *event) {
-    gtk_widget_event(state.scrollBar, event);
-}
-
 void fontMenuAction(GtkMenuItem *menuItem) {
     GtkWidget *dialog = NULL;
     gint dialogResult = 0;
@@ -307,25 +262,6 @@ void fontMenuAction(GtkMenuItem *menuItem) {
     }
 
     gtk_widget_destroy(dialog);
-}
-
-void updateTitle() {
-    char titleBuffer[39] = {0}; // 50 bytes for the file + 8 bytes for "JAFHE - " + 1 byte for terminator
-
-    if(state.fileFullName != NULL) {
-        char *fileName = rindex(state.fileFullName, '/') + 1;
-
-        if(strlen(fileName) > 30) {
-            snprintf(titleBuffer, 39, "JAFHE - %.27s...", fileName);
-        }
-        else {
-            snprintf(titleBuffer, 39, "JAFHE - %s", fileName);
-        }
-        gtk_window_set_title(GTK_WINDOW(state.window), titleBuffer);
-    }
-    else {
-        gtk_window_set_title(GTK_WINDOW(state.window), "JAFHE");
-    }
 }
 
 bool onKeyPress(GtkWidget *widget, GdkEventKey *event) {
@@ -357,31 +293,6 @@ bool onKeyPress(GtkWidget *widget, GdkEventKey *event) {
                 gtk_adjustment_set_value(state.scrollAdj, newValue);
             }
             break;
-
-        // case GDK_KEY_o:
-        // case GDK_KEY_O:
-        //     if(event->state & GDK_CONTROL_MASK) {
-        //         openMenuAction(NULL);
-        //     }
-        //     break;
-
-        // case GDK_KEY_w:
-        // case GDK_KEY_W:
-        //     if(event->state & GDK_CONTROL_MASK) {
-        //         closeCurrentFile(TRUE);
-        //     }
-
-        // case GDK_KEY_g:
-        // case GDK_KEY_G:
-        //     if(event->state & GDK_CONTROL_MASK && state.file) {
-        //         openGotoDialog();
-        //     }
-        //     break;
-
-        // case GDK_KEY_q:
-        // case GDK_KEY_Q:
-        //     shutdownAndCleanup();
-        //     break;
     }
 
     return FALSE;
@@ -402,6 +313,107 @@ void onUpdateSize(GtkWidget *widget, GdkRectangle *newRectangle) {
     if(state.scrollAdj) {
         uint value = gtk_adjustment_get_value(state.scrollAdj);
         gtk_adjustment_configure(state.scrollAdj, value, 0, (state.widgetHeight % state.fontHeight ? state.fileNumLines + 1 : state.fileNumLines), 1, 1, state.numLines); // Ternary adjusts for rendering cutoff last line in file
+    }
+}
+
+void onAdjValueChanged(GtkAdjustment *adj) {
+    if(state.viewWidgetsBox) {
+        gtk_widget_queue_draw(state.viewWidgetsBox);
+    }
+}
+
+void onScrollEvent(GtkWidget *widget, GdkEvent *event) {
+    gtk_widget_event(state.scrollBar, event);
+}
+
+void updateTitle() {
+    char titleBuffer[39] = {0}; // 50 bytes for the file + 8 bytes for "JAFHE - " + 1 byte for terminator
+
+    if(state.fileFullName != NULL) {
+        char *fileName = rindex(state.fileFullName, '/') + 1;
+
+        if(strlen(fileName) > 30) {
+            snprintf(titleBuffer, 39, "JAFHE - %.27s...", fileName);
+        }
+        else {
+            snprintf(titleBuffer, 39, "JAFHE - %s", fileName);
+        }
+        gtk_window_set_title(GTK_WINDOW(state.window), titleBuffer);
+    }
+    else {
+        gtk_window_set_title(GTK_WINDOW(state.window), "JAFHE");
+    }
+}
+
+uint getFontWidth(GtkWidget *widget, PangoFontDescription *fontDesc) {
+    PangoLayout *layout = gtk_widget_create_pango_layout(widget, "");
+    PangoRectangle rect = {0};
+
+    uint maxWidth = 0;
+    char str[2] = {0};
+
+    pango_layout_set_font_description(layout, fontDesc);
+
+    for(int i = 0x20; i <= 0x7E; i++) {
+        snprintf(str, 2, "%c", (char) i);
+        pango_layout_set_text(layout,  str, -1);
+        pango_layout_get_pixel_extents(layout, NULL, &rect);
+
+        maxWidth = MAX(rect.width, maxWidth);
+    }
+
+    g_object_unref(G_OBJECT(layout));
+
+    return maxWidth;
+}
+
+void updateFont(PangoFontDescription *newDesc) {
+    GtkWidget *temp = NULL;
+
+    PangoContext *hexPangoContext = NULL;
+    PangoFontMetrics *fontMetrics = NULL;
+
+    pango_font_description_free(state.fontDesc);
+    state.fontDesc = newDesc;
+
+    temp = gtk_text_view_new();
+
+    hexPangoContext = gtk_widget_get_pango_context(temp);
+    fontMetrics = pango_context_get_metrics(hexPangoContext, state.fontDesc, NULL);
+
+    state.fontHeight = PANGO_PIXELS(pango_font_metrics_get_ascent(fontMetrics)) + PANGO_PIXELS(pango_font_metrics_get_descent(fontMetrics)) + 2;
+    state.fontWidth = getFontWidth(temp, state.fontDesc);
+
+    gtk_widget_destroy(temp);
+    
+    updateSizeRequests();
+
+    if(state.viewWidgetsBox) {
+        gtk_widget_queue_draw(state.viewWidgetsBox);
+    }
+}
+
+void updateSizeRequests() {
+    int height = -1;
+
+    if(state.file) {
+        height = MIN(10, state.fileNumLines) * state.fontHeight;
+    }
+
+    if(state.viewWidgetsBox) {
+        gtk_widget_set_size_request(state.viewWidgetsBox, -1, height);
+    }
+
+    if(state.offsetBox) {
+        gtk_widget_set_size_request(state.offsetBox, 8 * state.fontWidth + 2 * TEXT_MARGIN_PX, height);
+    }
+
+    if(state.hexBox) {
+        gtk_widget_set_size_request(state.hexBox, (HEX_BUFFER_LENGTH - 1) * state.fontWidth + 2 * TEXT_MARGIN_PX, height);
+    }
+
+    if(state.asciiBox) {
+        gtk_widget_set_size_request(state.asciiBox, (ASCII_BUFFER_LENGTH - 1) * state.fontWidth + 2 * TEXT_MARGIN_PX, height);
     }
 }
 
@@ -496,10 +508,6 @@ gboolean renderHexBox(GtkWidget *widget, cairo_t *cr) {
 
     gtk_render_background(styleContext, cr, 0, 0, width, height);
 
-    // cairo_arc(cr, width / 2.0, height / 2.0, MIN(width, height) / 2.0, 0, 2 * G_PI);
-    // gdk_cairo_set_source_rgba(cr, &fgColor);
-    // cairo_fill(cr);
-
     gdk_cairo_set_source_rgba(cr, &fgColor);
     pango_layout_set_font_description(pangoLayout, state.fontDesc);
 
@@ -557,11 +565,18 @@ gboolean renderAsciiBox(GtkWidget *widget, cairo_t *cr) {
     return FALSE;
 }
 
-void onAdjValueChanged(GtkAdjustment *adj) {
-    printf("%f\n", gtk_adjustment_get_value(adj));
-    if(state.fileWidgetsBox) {
-        gtk_widget_queue_draw(state.fileWidgetsBox);
+void toggleMenuSensitivity() {
+    bool sensitivity = FALSE;
+
+    if(state.file) {
+        sensitivity = TRUE;
     }
+    else {
+        sensitivity = FALSE;
+    }
+
+    gtk_widget_set_sensitive(state.closeMenuI, sensitivity);
+    gtk_widget_set_sensitive(state.gotoMenuI,  sensitivity);
 }
 
 bool accelCallback(GtkAccelGroup *group, GObject *obj, guint keyval, GdkModifierType modifier, gpointer data) {
@@ -581,8 +596,6 @@ GtkWidget *buildMenu() {
     GtkWidget *fileMenuI =   NULL;
 
     GtkWidget *openMenuI =   NULL;
-    GtkWidget *closeMenuI =  NULL;
-    GtkWidget *gotoMenuI =   NULL;
     GtkWidget *fontMenuI =   NULL;
     GtkWidget *quitMenuI =   NULL;
 
@@ -590,29 +603,29 @@ GtkWidget *buildMenu() {
     fileMenu =    gtk_menu_new();
     fileMenuI =   gtk_menu_item_new_with_label("File");
 
-    openMenuI =   gtk_menu_item_new_with_label("Open");
-    closeMenuI =  gtk_menu_item_new_with_label("Close");
-    gotoMenuI =   gtk_menu_item_new_with_label("Goto");
-    fontMenuI =   gtk_menu_item_new_with_label("Font");
-    quitMenuI =   gtk_menu_item_new_with_label("Quit");
+    openMenuI =        gtk_menu_item_new_with_label("Open");
+    state.closeMenuI = gtk_menu_item_new_with_label("Close");
+    state.gotoMenuI =  gtk_menu_item_new_with_label("Goto");
+    fontMenuI =        gtk_menu_item_new_with_label("Font");
+    quitMenuI =        gtk_menu_item_new_with_label("Quit");
 
-    g_signal_connect(G_OBJECT(openMenuI),   "activate", G_CALLBACK(openMenuAction),     NULL);
-    g_signal_connect(G_OBJECT(closeMenuI),  "activate", G_CALLBACK(closeCurrentFile),   NULL);
-    g_signal_connect(G_OBJECT(gotoMenuI),   "activate", G_CALLBACK(gotoMenuAction),     NULL);
-    g_signal_connect(G_OBJECT(fontMenuI),   "activate", G_CALLBACK(fontMenuAction),     NULL);
-    g_signal_connect(G_OBJECT(quitMenuI),   "activate", G_CALLBACK(shutdownAndCleanup), NULL);
+    g_signal_connect(G_OBJECT(openMenuI),        "activate", G_CALLBACK(openMenuAction),     NULL);
+    g_signal_connect(G_OBJECT(state.closeMenuI), "activate", G_CALLBACK(closeCurrentFile),   NULL);
+    g_signal_connect(G_OBJECT(state.gotoMenuI),  "activate", G_CALLBACK(gotoMenuAction),     NULL);
+    g_signal_connect(G_OBJECT(fontMenuI),        "activate", G_CALLBACK(fontMenuAction),     NULL);
+    g_signal_connect(G_OBJECT(quitMenuI),        "activate", G_CALLBACK(shutdownAndCleanup), NULL);
 
     gtk_accel_map_add_entry("<JAFHE>/File/Open",  GDK_KEY_O, GDK_CONTROL_MASK);
-    gtk_accel_map_add_entry("<JAFHE>/File/Close", GDK_KEY_C, GDK_CONTROL_MASK);
+    gtk_accel_map_add_entry("<JAFHE>/File/Close", GDK_KEY_W, GDK_CONTROL_MASK);
     gtk_accel_map_add_entry("<JAFHE>/File/Goto",  GDK_KEY_G, GDK_CONTROL_MASK);
     gtk_accel_map_add_entry("<JAFHE>/File/Quit",  GDK_KEY_Q, GDK_CONTROL_MASK);
 
     accelGroup = gtk_accel_group_new();
 
-    openClosure =  g_cclosure_new(G_CALLBACK(accelCallback), openMenuI, 0);
-    closeClosure = g_cclosure_new(G_CALLBACK(accelCallback), closeMenuI, 0);
-    gotoClosure =  g_cclosure_new(G_CALLBACK(accelCallback), gotoMenuI, 0);
-    quitClosure =  g_cclosure_new(G_CALLBACK(accelCallback), quitMenuI, 0);
+    openClosure =  g_cclosure_new(G_CALLBACK(accelCallback), openMenuI,        0);
+    closeClosure = g_cclosure_new(G_CALLBACK(accelCallback), state.closeMenuI, 0);
+    gotoClosure =  g_cclosure_new(G_CALLBACK(accelCallback), state.gotoMenuI,  0);
+    quitClosure =  g_cclosure_new(G_CALLBACK(accelCallback), quitMenuI,        0);
 
     gtk_accel_group_connect_by_path(accelGroup, "<JAFHE>/File/Open",  openClosure);
     gtk_accel_group_connect_by_path(accelGroup, "<JAFHE>/File/Close", closeClosure);
@@ -622,19 +635,21 @@ GtkWidget *buildMenu() {
     gtk_window_add_accel_group(GTK_WINDOW(state.window), accelGroup);
     gtk_menu_set_accel_group(GTK_MENU(fileMenu), accelGroup);
 
-    gtk_menu_item_set_accel_path(GTK_MENU_ITEM(openMenuI),  "<JAFHE>/File/Open");
-    gtk_menu_item_set_accel_path(GTK_MENU_ITEM(closeMenuI), "<JAFHE>/File/Close");
-    gtk_menu_item_set_accel_path(GTK_MENU_ITEM(gotoMenuI),  "<JAFHE>/File/Goto");
-    gtk_menu_item_set_accel_path(GTK_MENU_ITEM(quitMenuI),  "<JAFHE>/File/Quit");
+    gtk_menu_item_set_accel_path(GTK_MENU_ITEM(openMenuI),        "<JAFHE>/File/Open");
+    gtk_menu_item_set_accel_path(GTK_MENU_ITEM(state.closeMenuI), "<JAFHE>/File/Close");
+    gtk_menu_item_set_accel_path(GTK_MENU_ITEM(state.gotoMenuI),  "<JAFHE>/File/Goto");
+    gtk_menu_item_set_accel_path(GTK_MENU_ITEM(quitMenuI),        "<JAFHE>/File/Quit");
 
     gtk_menu_shell_append(GTK_MENU_SHELL(menubar), fileMenuI);
     gtk_menu_item_set_submenu(GTK_MENU_ITEM(fileMenuI), fileMenu);
     
     gtk_menu_shell_append(GTK_MENU_SHELL(fileMenu), openMenuI);
-    gtk_menu_shell_append(GTK_MENU_SHELL(fileMenu), closeMenuI);
-    gtk_menu_shell_append(GTK_MENU_SHELL(fileMenu), gotoMenuI);
+    gtk_menu_shell_append(GTK_MENU_SHELL(fileMenu), state.closeMenuI);
+    gtk_menu_shell_append(GTK_MENU_SHELL(fileMenu), state.gotoMenuI);
     gtk_menu_shell_append(GTK_MENU_SHELL(fileMenu), fontMenuI);
     gtk_menu_shell_append(GTK_MENU_SHELL(fileMenu), quitMenuI);
+
+    toggleMenuSensitivity();
 
     return menubar;
 }
@@ -667,8 +682,8 @@ int main(int argc, char **argv) {
 
     menubar = buildMenu();
 
-    state.fileWidgetsBox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
-    gtk_box_set_spacing(GTK_BOX(state.fileWidgetsBox), BOX_SPACING_PX);
+    state.viewWidgetsBox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+    gtk_box_set_spacing(GTK_BOX(state.viewWidgetsBox), BOX_SPACING_PX);
 
     state.offsetBox = gtk_drawing_area_new();
     g_signal_connect(state.offsetBox, "draw", G_CALLBACK(renderOffsetBox), NULL);
@@ -694,13 +709,13 @@ int main(int argc, char **argv) {
 
     updateSizeRequests();
 
-    gtk_box_pack_start(GTK_BOX(state.fileWidgetsBox), state.offsetBox, FALSE, FALSE, 0);
-    gtk_box_pack_start(GTK_BOX(state.fileWidgetsBox), state.hexBox, FALSE, FALSE, 0);
-    gtk_box_pack_start(GTK_BOX(state.fileWidgetsBox), state.asciiBox, FALSE, FALSE, 0);
-    gtk_box_pack_end(GTK_BOX(state.fileWidgetsBox), state.scrollBar, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(state.viewWidgetsBox), state.offsetBox, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(state.viewWidgetsBox), state.hexBox, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(state.viewWidgetsBox), state.asciiBox, FALSE, FALSE, 0);
+    gtk_box_pack_end(GTK_BOX(state.viewWidgetsBox), state.scrollBar, FALSE, FALSE, 0);
 
     gtk_box_pack_start(GTK_BOX(vbox), menubar, FALSE, FALSE, 0);
-    gtk_box_pack_start(GTK_BOX(vbox), state.fileWidgetsBox, TRUE, TRUE, 0);
+    gtk_box_pack_start(GTK_BOX(vbox), state.viewWidgetsBox, TRUE, TRUE, 0);
 
     gtk_widget_show_all(state.window);
 
