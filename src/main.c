@@ -8,11 +8,6 @@
 #define IN_RANGE(x, min, max) ((x >= min) && (x <= max))
 #define CLAMP_VALUE(x, min, max) do{if(x < min){x = min;} else if(x > max){x = max;}} while(0);
 
-#define OPEN_ACCEL_PATH  "jafhe/open"
-#define CLOSE_ACCEL_PATH "jafhe/close"
-#define GOTO_ACCEL_PATH  "jafhe/goto"
-#define QUIT_ACCEL_PATH  "jafhe/quit"
-
 #define LINE_LENGTH 16
 #define DEFAULT_FONT "Monospace Normal 12"
 
@@ -333,7 +328,7 @@ void updateTitle() {
     }
 }
 
-void onKeyPress(GtkWidget *widget, GdkEventKey *event) {
+bool onKeyPress(GtkWidget *widget, GdkEventKey *event) {
     switch(event->keyval) {
         case GDK_KEY_k:
         case GDK_KEY_Up:
@@ -363,31 +358,33 @@ void onKeyPress(GtkWidget *widget, GdkEventKey *event) {
             }
             break;
 
-        case GDK_KEY_o:
-        case GDK_KEY_O:
-            if(event->state & GDK_CONTROL_MASK) {
-                openMenuAction(NULL);
-            }
-            break;
+        // case GDK_KEY_o:
+        // case GDK_KEY_O:
+        //     if(event->state & GDK_CONTROL_MASK) {
+        //         openMenuAction(NULL);
+        //     }
+        //     break;
 
-        case GDK_KEY_w:
-        case GDK_KEY_W:
-            if(event->state & GDK_CONTROL_MASK) {
-                closeCurrentFile(TRUE);
-            }
+        // case GDK_KEY_w:
+        // case GDK_KEY_W:
+        //     if(event->state & GDK_CONTROL_MASK) {
+        //         closeCurrentFile(TRUE);
+        //     }
 
-        case GDK_KEY_g:
-        case GDK_KEY_G:
-            if(event->state & GDK_CONTROL_MASK && state.file) {
-                openGotoDialog();
-            }
-            break;
+        // case GDK_KEY_g:
+        // case GDK_KEY_G:
+        //     if(event->state & GDK_CONTROL_MASK && state.file) {
+        //         openGotoDialog();
+        //     }
+        //     break;
 
-        case GDK_KEY_q:
-        case GDK_KEY_Q:
-            shutdownAndCleanup();
-            break;
+        // case GDK_KEY_q:
+        // case GDK_KEY_Q:
+        //     shutdownAndCleanup();
+        //     break;
     }
+
+    return FALSE;
 }
 
 void onUpdateSize(GtkWidget *widget, GdkRectangle *newRectangle) {
@@ -567,8 +564,18 @@ void onAdjValueChanged(GtkAdjustment *adj) {
     }
 }
 
+bool accelCallback(GtkAccelGroup *group, GObject *obj, guint keyval, GdkModifierType modifier, gpointer data) {
+    return FALSE; // Allow other handlers to process the signal
+}
+
 GtkWidget *buildMenu() {
     GtkWidget *menubar =     NULL;
+
+    GtkAccelGroup *accelGroup = NULL;
+    GClosure *openClosure = NULL;
+    GClosure *closeClosure = NULL;
+    GClosure *gotoClosure = NULL;
+    GClosure *quitClosure = NULL;
 
     GtkWidget *fileMenu =    NULL;
     GtkWidget *fileMenuI =   NULL;
@@ -594,6 +601,31 @@ GtkWidget *buildMenu() {
     g_signal_connect(G_OBJECT(gotoMenuI),   "activate", G_CALLBACK(gotoMenuAction),     NULL);
     g_signal_connect(G_OBJECT(fontMenuI),   "activate", G_CALLBACK(fontMenuAction),     NULL);
     g_signal_connect(G_OBJECT(quitMenuI),   "activate", G_CALLBACK(shutdownAndCleanup), NULL);
+
+    gtk_accel_map_add_entry("<JAFHE>/File/Open",  GDK_KEY_O, GDK_CONTROL_MASK);
+    gtk_accel_map_add_entry("<JAFHE>/File/Close", GDK_KEY_C, GDK_CONTROL_MASK);
+    gtk_accel_map_add_entry("<JAFHE>/File/Goto",  GDK_KEY_G, GDK_CONTROL_MASK);
+    gtk_accel_map_add_entry("<JAFHE>/File/Quit",  GDK_KEY_Q, GDK_CONTROL_MASK);
+
+    accelGroup = gtk_accel_group_new();
+
+    openClosure =  g_cclosure_new(G_CALLBACK(accelCallback), openMenuI, 0);
+    closeClosure = g_cclosure_new(G_CALLBACK(accelCallback), closeMenuI, 0);
+    gotoClosure =  g_cclosure_new(G_CALLBACK(accelCallback), gotoMenuI, 0);
+    quitClosure =  g_cclosure_new(G_CALLBACK(accelCallback), quitMenuI, 0);
+
+    gtk_accel_group_connect_by_path(accelGroup, "<JAFHE>/File/Open",  openClosure);
+    gtk_accel_group_connect_by_path(accelGroup, "<JAFHE>/File/Close", closeClosure);
+    gtk_accel_group_connect_by_path(accelGroup, "<JAFHE>/File/Goto",  gotoClosure);
+    gtk_accel_group_connect_by_path(accelGroup, "<JAFHE>/File/Quit",  quitClosure);
+
+    gtk_window_add_accel_group(GTK_WINDOW(state.window), accelGroup);
+    gtk_menu_set_accel_group(GTK_MENU(fileMenu), accelGroup);
+
+    gtk_menu_item_set_accel_path(GTK_MENU_ITEM(openMenuI),  "<JAFHE>/File/Open");
+    gtk_menu_item_set_accel_path(GTK_MENU_ITEM(closeMenuI), "<JAFHE>/File/Close");
+    gtk_menu_item_set_accel_path(GTK_MENU_ITEM(gotoMenuI),  "<JAFHE>/File/Goto");
+    gtk_menu_item_set_accel_path(GTK_MENU_ITEM(quitMenuI),  "<JAFHE>/File/Quit");
 
     gtk_menu_shell_append(GTK_MENU_SHELL(menubar), fileMenuI);
     gtk_menu_item_set_submenu(GTK_MENU_ITEM(fileMenuI), fileMenu);
