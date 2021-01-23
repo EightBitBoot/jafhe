@@ -6,6 +6,12 @@
 #include <gtk/gtk.h>
 
 #define IN_RANGE(x, min, max) ((x >= min) && (x <= max))
+#define CLAMP_VALUE(x, min, max) do{if(x < min){x = min;} else if(x > max){x = max;}} while(0);
+
+#define OPEN_ACCEL_PATH  "jafhe/open"
+#define CLOSE_ACCEL_PATH "jafhe/close"
+#define GOTO_ACCEL_PATH  "jafhe/goto"
+#define QUIT_ACCEL_PATH  "jafhe/quit"
 
 #define LINE_LENGTH 16
 #define DEFAULT_FONT "Monospace Normal 12"
@@ -56,6 +62,7 @@ static ProgramState state = {0};
 void closeCurrentFile(bool titleUpdateNeeded);
 void updateTitle();
 void updateSizeRequests();
+void openGotoDialog();
 
 int jceil(double value) {
     if(value > (int) value) {
@@ -165,6 +172,72 @@ uint getFontWidth(GtkWidget *widget, PangoFontDescription *fontDesc) {
     return maxWidth;
 }
 
+void gotoActivateCallback(GtkWidget *widget, gpointer data) {
+    gtk_dialog_response(GTK_DIALOG(data), GTK_RESPONSE_ACCEPT);
+}
+
+void openGotoDialog() {
+    GtkWidget *dialog = NULL;
+    GtkWidget *dialogCBox = NULL;
+    GtkWidget *entry = NULL;
+
+    bool done = FALSE;
+    gint response = 0;
+
+    dialog = gtk_dialog_new_with_buttons("Jump To Offset", GTK_WINDOW(state.window), GTK_DIALOG_MODAL | GTK_DIALOG_DESTROY_WITH_PARENT, "Cancel", GTK_RESPONSE_CANCEL, "Open", GTK_RESPONSE_ACCEPT, NULL);
+    gtk_widget_set_events(dialog, GDK_KEY_PRESS_MASK);
+
+    entry = gtk_entry_new();
+    g_signal_connect(entry, "activate", G_CALLBACK(gotoActivateCallback), dialog); // Done this way because gtk_dialog_add_action_widget doesn't working
+    dialogCBox = gtk_dialog_get_content_area(GTK_DIALOG(dialog));
+    gtk_box_pack_start(GTK_BOX(dialogCBox), entry, FALSE, FALSE, 0);
+    gtk_widget_show(entry);
+
+    while(!done) {
+        response = gtk_dialog_run(GTK_DIALOG(dialog));
+
+        if(response == GTK_RESPONSE_ACCEPT) {
+            const char *entryText = gtk_entry_get_text(GTK_ENTRY(entry));
+            char *rest = NULL;
+            long offset = 0;
+
+            offset = strtol(entryText, &rest, 16);
+            printf("Entry: %s\n", entryText);
+            printf("Offset: %ld\n", offset);
+            printf("Rest: %s\n", rest);
+
+            if(strlen(rest) != 0) {
+                GtkWidget *invalidDialog = gtk_message_dialog_new(GTK_WINDOW(dialog), GTK_DIALOG_MODAL | GTK_DIALOG_DESTROY_WITH_PARENT, GTK_MESSAGE_ERROR, GTK_BUTTONS_CLOSE, "Invalid Offset: \"%s\"", entryText);
+                gtk_dialog_run(GTK_DIALOG(invalidDialog));
+                gtk_widget_destroy(invalidDialog);
+                gtk_entry_set_text(GTK_ENTRY(entry), "");
+            } 
+            else {
+                // Success
+                // TODO(Adin): Update for resizable lines
+                offset >>= 4; // Divide by line length (2^4 or 16)
+                int adjUpper = gtk_adjustment_get_upper(state.scrollAdj);
+                int adjPSize = gtk_adjustment_get_page_size(state.scrollAdj);
+                CLAMP_VALUE(offset, 0, adjUpper - adjPSize);
+                gtk_adjustment_set_value(state.scrollAdj, offset);
+                done = TRUE;
+            }
+            
+        }
+        else {
+            done = TRUE;
+        }
+    }
+
+    gtk_widget_destroy(dialog);
+}
+
+void gotoMenuAction(GtkWidget *widget) {
+    if(state.file) {
+        openGotoDialog();
+    }
+}
+
 void updateSizeRequests() {
     int height = -1;
 
@@ -201,7 +274,6 @@ void updateFont(PangoFontDescription *newDesc) {
     pango_font_description_free(state.fontDesc);
     state.fontDesc = newDesc;
 
-    // TODO(Adin): Update font metrics 
     temp = gtk_text_view_new();
 
     hexPangoContext = gtk_widget_get_pango_context(temp);
@@ -263,6 +335,7 @@ void updateTitle() {
 
 void onKeyPress(GtkWidget *widget, GdkEventKey *event) {
     switch(event->keyval) {
+        case GDK_KEY_k:
         case GDK_KEY_Up:
             if(state.scrollAdj && state.file) {
                 int newValue = gtk_adjustment_get_value(state.scrollAdj) - 1;
@@ -275,6 +348,7 @@ void onKeyPress(GtkWidget *widget, GdkEventKey *event) {
             }
             break;
 
+        case GDK_KEY_j:
         case GDK_KEY_Down:
             if(state.scrollAdj && state.file) {
                 int newValue = gtk_adjustment_get_value(state.scrollAdj) + 1;
@@ -287,6 +361,31 @@ void onKeyPress(GtkWidget *widget, GdkEventKey *event) {
 
                 gtk_adjustment_set_value(state.scrollAdj, newValue);
             }
+            break;
+
+        case GDK_KEY_o:
+        case GDK_KEY_O:
+            if(event->state & GDK_CONTROL_MASK) {
+                openMenuAction(NULL);
+            }
+            break;
+
+        case GDK_KEY_w:
+        case GDK_KEY_W:
+            if(event->state & GDK_CONTROL_MASK) {
+                closeCurrentFile(TRUE);
+            }
+
+        case GDK_KEY_g:
+        case GDK_KEY_G:
+            if(event->state & GDK_CONTROL_MASK && state.file) {
+                openGotoDialog();
+            }
+            break;
+
+        case GDK_KEY_q:
+        case GDK_KEY_Q:
+            shutdownAndCleanup();
             break;
     }
 }
@@ -305,12 +404,11 @@ void onUpdateSize(GtkWidget *widget, GdkRectangle *newRectangle) {
 
     if(state.scrollAdj) {
         uint value = gtk_adjustment_get_value(state.scrollAdj);
-        gtk_adjustment_configure(state.scrollAdj, value, 0, state.fileNumLines, 1, 1, state.numLines);
+        gtk_adjustment_configure(state.scrollAdj, value, 0, (state.widgetHeight % state.fontHeight ? state.fileNumLines + 1 : state.fileNumLines), 1, 1, state.numLines); // Ternary adjusts for rendering cutoff last line in file
     }
 }
 
 void fillHexBuffer(ulong offset) {
-    // TODO(Adin): Update for when ending lines in a file are less than a full line
     // TODO(Adin): Update when lines are resizable
 
     for(long i = 0; i < MIN(LINE_LENGTH, state.fileLength - offset); i++) {
@@ -324,7 +422,6 @@ void fillHexBuffer(ulong offset) {
 } 
 
 void fillAsciiBuffer(ulong offset) {
-    // TODO(Adin): Update for when ending lines in a file are less than a full line
     // TODO(Adin): Update when lines are resizable
     char current = 0;
 
@@ -366,8 +463,8 @@ gboolean renderOffsetBox(GtkWidget *widget, cairo_t *cr) {
     gdk_cairo_set_source_rgba(cr, &fgColor);
     pango_layout_set_font_description(pangoLayout, state.fontDesc);
 
-    uint linesToDraw = MIN(state.numLines, state.fileNumLines); // TODO(Adin): Update for scrolling
     uint adjValue = gtk_adjustment_get_value(state.scrollAdj);
+    uint linesToDraw = MIN(state.numLines, state.fileNumLines - adjValue);
     for(int i = 0; i < linesToDraw; i++) {
         snprintf(buffer, 9, "%08X", (adjValue * LINE_LENGTH) + i * LINE_LENGTH);
         pango_layout_set_text(pangoLayout, buffer, 10);
@@ -409,8 +506,8 @@ gboolean renderHexBox(GtkWidget *widget, cairo_t *cr) {
     gdk_cairo_set_source_rgba(cr, &fgColor);
     pango_layout_set_font_description(pangoLayout, state.fontDesc);
 
-    uint linesToDraw = MIN(state.numLines, state.fileNumLines); // TODO(Adin): Update for scrolling
     uint adjValue = gtk_adjustment_get_value(state.scrollAdj);
+    uint linesToDraw = MIN(state.numLines, state.fileNumLines - adjValue);
     for(int i = 0; i < linesToDraw; i++) {
         fillHexBuffer((adjValue * LINE_LENGTH) + i * LINE_LENGTH);
         pango_layout_set_text(pangoLayout, state.hexLineBuffer, -1);
@@ -448,8 +545,8 @@ gboolean renderAsciiBox(GtkWidget *widget, cairo_t *cr) {
     gdk_cairo_set_source_rgba(cr, &fgColor);
     pango_layout_set_font_description(pangoLayout, state.fontDesc);
 
-    uint linesToDraw = MIN(state.numLines, state.fileNumLines); // TODO(Adin): Update for scrolling
     uint adjValue = gtk_adjustment_get_value(state.scrollAdj);
+    uint linesToDraw = MIN(state.numLines, state.fileNumLines - adjValue);
     for(int i = 0; i < linesToDraw; i++) {
         fillAsciiBuffer((adjValue * LINE_LENGTH) + i * LINE_LENGTH);
         pango_layout_set_text(pangoLayout, state.asciiLineBuffer, -1);
@@ -478,7 +575,9 @@ GtkWidget *buildMenu() {
 
     GtkWidget *openMenuI =   NULL;
     GtkWidget *closeMenuI =  NULL;
+    GtkWidget *gotoMenuI =   NULL;
     GtkWidget *fontMenuI =   NULL;
+    GtkWidget *quitMenuI =   NULL;
 
     menubar =     gtk_menu_bar_new();
     fileMenu =    gtk_menu_new();
@@ -486,18 +585,24 @@ GtkWidget *buildMenu() {
 
     openMenuI =   gtk_menu_item_new_with_label("Open");
     closeMenuI =  gtk_menu_item_new_with_label("Close");
+    gotoMenuI =   gtk_menu_item_new_with_label("Goto");
     fontMenuI =   gtk_menu_item_new_with_label("Font");
+    quitMenuI =   gtk_menu_item_new_with_label("Quit");
 
-    g_signal_connect(G_OBJECT(openMenuI),   "activate", G_CALLBACK(openMenuAction),   NULL);
-    g_signal_connect(G_OBJECT(closeMenuI),  "activate", G_CALLBACK(closeCurrentFile), NULL);
-    g_signal_connect(G_OBJECT(fontMenuI),   "activate", G_CALLBACK(fontMenuAction),   NULL);
+    g_signal_connect(G_OBJECT(openMenuI),   "activate", G_CALLBACK(openMenuAction),     NULL);
+    g_signal_connect(G_OBJECT(closeMenuI),  "activate", G_CALLBACK(closeCurrentFile),   NULL);
+    g_signal_connect(G_OBJECT(gotoMenuI),   "activate", G_CALLBACK(gotoMenuAction),     NULL);
+    g_signal_connect(G_OBJECT(fontMenuI),   "activate", G_CALLBACK(fontMenuAction),     NULL);
+    g_signal_connect(G_OBJECT(quitMenuI),   "activate", G_CALLBACK(shutdownAndCleanup), NULL);
 
     gtk_menu_shell_append(GTK_MENU_SHELL(menubar), fileMenuI);
     gtk_menu_item_set_submenu(GTK_MENU_ITEM(fileMenuI), fileMenu);
     
     gtk_menu_shell_append(GTK_MENU_SHELL(fileMenu), openMenuI);
     gtk_menu_shell_append(GTK_MENU_SHELL(fileMenu), closeMenuI);
+    gtk_menu_shell_append(GTK_MENU_SHELL(fileMenu), gotoMenuI);
     gtk_menu_shell_append(GTK_MENU_SHELL(fileMenu), fontMenuI);
+    gtk_menu_shell_append(GTK_MENU_SHELL(fileMenu), quitMenuI);
 
     return menubar;
 }
@@ -551,7 +656,7 @@ int main(int argc, char **argv) {
     g_signal_connect(state.asciiBox, "draw", G_CALLBACK(renderAsciiBox), NULL);
     g_signal_connect(state.asciiBox, "scroll-event", G_CALLBACK(onScrollEvent), NULL);
 
-    state.scrollAdj = gtk_adjustment_new(0.0, 0.0, 0.0, 0.0, 0.0, 0.0); // TODO(Adin): Change
+    state.scrollAdj = gtk_adjustment_new(0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
     g_signal_connect(state.scrollAdj, "value-changed", G_CALLBACK(onAdjValueChanged), NULL);
     state.scrollBar = gtk_scrollbar_new(GTK_ORIENTATION_VERTICAL, state.scrollAdj);
 
