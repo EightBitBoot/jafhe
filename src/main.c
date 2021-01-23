@@ -261,6 +261,36 @@ void updateTitle() {
     }
 }
 
+void onKeyPress(GtkWidget *widget, GdkEventKey *event) {
+    switch(event->keyval) {
+        case GDK_KEY_Up:
+            if(state.scrollAdj && state.file) {
+                int newValue = gtk_adjustment_get_value(state.scrollAdj) - 1;
+
+                if(newValue < 0) {
+                    newValue = 0;
+                }
+
+                gtk_adjustment_set_value(state.scrollAdj, newValue);
+            }
+            break;
+
+        case GDK_KEY_Down:
+            if(state.scrollAdj && state.file) {
+                int newValue = gtk_adjustment_get_value(state.scrollAdj) + 1;
+                int upper = gtk_adjustment_get_upper(state.scrollAdj);
+                int pSize = gtk_adjustment_get_page_size(state.scrollAdj);
+
+                if(newValue > upper - pSize) {
+                    newValue = upper - pSize;
+                }
+
+                gtk_adjustment_set_value(state.scrollAdj, newValue);
+            }
+            break;
+    }
+}
+
 void onUpdateSize(GtkWidget *widget, GdkRectangle *newRectangle) {
     if(newRectangle) {
         state.widgetHeight = newRectangle->height; 
@@ -488,7 +518,9 @@ int main(int argc, char **argv) {
     gtk_window_set_title(GTK_WINDOW(state.window), "JAFHE");
     gtk_window_set_default_size(GTK_WINDOW(state.window), 600, 400);
     gtk_window_set_icon_from_file(GTK_WINDOW(state.window), "jafhe.svg", NULL); // Does this even do anything?
+    gtk_widget_set_events(state.window, GDK_KEY_PRESS_MASK);
     g_signal_connect(G_OBJECT(state.window), "destroy", G_CALLBACK(shutdownAndCleanup), NULL);
+    g_signal_connect(G_OBJECT(state.window), "key-press-event", G_CALLBACK(onKeyPress), NULL);
 
     defaultFontDesc = pango_font_description_from_string(DEFAULT_FONT);
     updateFont(defaultFontDesc);
@@ -519,7 +551,7 @@ int main(int argc, char **argv) {
     g_signal_connect(state.asciiBox, "draw", G_CALLBACK(renderAsciiBox), NULL);
     g_signal_connect(state.asciiBox, "scroll-event", G_CALLBACK(onScrollEvent), NULL);
 
-    state.scrollAdj = gtk_adjustment_new(0.0, 0.0, 100.0, 1.0, 1.0, 20.0); // TODO(Adin): Change
+    state.scrollAdj = gtk_adjustment_new(0.0, 0.0, 0.0, 0.0, 0.0, 0.0); // TODO(Adin): Change
     g_signal_connect(state.scrollAdj, "value-changed", G_CALLBACK(onAdjValueChanged), NULL);
     state.scrollBar = gtk_scrollbar_new(GTK_ORIENTATION_VERTICAL, state.scrollAdj);
 
@@ -534,7 +566,6 @@ int main(int argc, char **argv) {
     gtk_box_pack_start(GTK_BOX(vbox), state.fileWidgetsBox, TRUE, TRUE, 0);
 
     gtk_widget_show_all(state.window);
-    // gtk_widget_hide(state.scrollBar);
 
     gtk_main();
 
